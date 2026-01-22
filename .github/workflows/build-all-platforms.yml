@@ -1,0 +1,93 @@
+# 工作流名称（GitHub Actions页面显示）
+name: Build JT128 All Platforms
+
+# 触发条件：推送到dev分支 或 手动触发（方便测试）
+on:
+  push:
+    branches: [ dev ]  # 仅dev分支推送时自动触发
+  workflow_dispatch:  # 允许手动触发
+
+# 多平台编译作业
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false  # 一个平台失败不影响其他平台
+      matrix:
+        # 平台矩阵：覆盖所有目标系统+架构
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        arch: [ x86_64, arm64 ]
+        # 兼容处理：新版macOS runner默认arm64，x86_64需用macos-12
+        exclude:
+          - os: macos-latest
+            arch: x86_64
+        include:
+          - os: macos-12
+            arch: x86_64
+
+    steps:
+      # 步骤1：检出dev分支源码
+      - name: Checkout dev branch source code
+        uses: actions/checkout@v4
+        with:
+          ref: dev  # 强制检出dev分支
+
+      # 步骤2：配置JDK 17（匹配你的本地JDK版本）
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'  # 稳定的OpenJDK发行版（Eclipse Temurin）
+          architecture: ${{ matrix.arch }}  # 匹配当前编译架构
+
+      # 步骤3：缓存依赖（加速编译，可选但推荐）
+      - name: Cache build dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.m2/repository  # Maven依赖缓存
+            ~/.gradle/caches  # Gradle依赖缓存
+          key: ${{ runner.os }}-${{ matrix.arch }}-java17-${{ hashFiles('**/pom.xml', '**/build.gradle') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-java17-
+
+      # 步骤4：编译源码（自动适配Maven/Gradle）
+      # 适配Maven项目（优先检测pom.xml）
+      - name: Build with Maven (JDK17)
+        if: exists('pom.xml')
+        run: mvn clean package -DskipTests  # 跳过测试加速编译
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+          ARCH: ${{ matrix.arch }}
+
+      # 适配Gradle项目（检测build.gradle/kts）
+      - name: Build with Gradle (JDK17)
+        if: exists('build.gradle') || exists('build.gradle.kts')
+        run: |
+          # 区分Windows/Linux/macOS执行命令
+          if [ "$RUNNER_OS" == "Linux" ] || [ "$RUNNER_OS" == "macOS" ]; then
+            chmod +x ./gradlew
+            ./gradlew clean build -x test
+          else
+            gradlew clean build -x test
+          fi
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+          ARCH: ${{ matrix.arch }}
+
+      # 步骤5：上传全平台产物（方便下载）
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: JT128-${{ runner.os }}-${{ matrix.arch }}  # 产物命名：项目-系统-架构
+          path: |
+            # 核心：根据你的项目实际产物路径调整！
+            target/*.dll   # Windows动态库（Maven输出）
+            target/*.so    # Linux动态库（Maven输出）
+            target/*.dylib # macOS动态库（Maven输出）
+            build/libs/*.dll  # Windows动态库（Gradle输出）
+            build/libs/*.so   # Linux动态库（Gradle输出）
+            build/libs/*.dylib # macOS动态库（Gradle输出）
+            target/*.jar    # 可选：上传jar包
+            build/libs/*.jar # 可选：上传jar包
+          if-no-files-found: warn  # 无文件仅警告，不中断流程
