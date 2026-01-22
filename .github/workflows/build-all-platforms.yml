@@ -14,11 +14,14 @@ jobs:
     strategy:
       fail-fast: false  # 一个平台失败不影响其他平台
       matrix:
-        # 平台矩阵：覆盖所有目标系统+架构
+        # 平台矩阵：兼容GitHub托管Runner的实际支持情况
         os: [ ubuntu-latest, windows-latest, macos-latest ]
         arch: [ x86_64, arm64 ]
-        # 兼容处理：新版macOS runner默认arm64，x86_64需用macos-12
+        # 排除不支持的组合：GitHub暂不提供Windows arm64托管Runner
         exclude:
+          - os: windows-latest
+            arch: arm64
+          # macOS-latest默认是arm64，x86_64用macos-12
           - os: macos-latest
             arch: x86_64
         include:
@@ -40,33 +43,50 @@ jobs:
           distribution: 'temurin'  # 稳定的OpenJDK发行版（Eclipse Temurin）
           architecture: ${{ matrix.arch }}  # 匹配当前编译架构
 
-      # 步骤3：缓存依赖（加速编译，可选但推荐）
+      # 步骤3：缓存依赖（加速编译）
       - name: Cache build dependencies
         uses: actions/cache@v3
         with:
           path: |
             ~/.m2/repository  # Maven依赖缓存
             ~/.gradle/caches  # Gradle依赖缓存
-          key: ${{ runner.os }}-${{ matrix.arch }}-java17-${{ hashFiles('**/pom.xml', '**/build.gradle') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-java17-${{ hashFiles('**/pom.xml', '**/build.gradle', '**/build.gradle.kts') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.arch }}-java17-
 
-      # 步骤4：编译源码（自动适配Maven/Gradle）
-      # 适配Maven项目（优先检测pom.xml）
+      # 步骤4：检测项目构建工具（核心修正：替换不支持的exists函数）
+      - name: Detect build tool (Maven/Gradle)
+        id: detect_build_tool
+        run: |
+          # 检查pom.xml是否存在（Maven项目）
+          if [ -f "pom.xml" ]; then 
+            echo "IS_MAVEN=true" >> $GITHUB_ENV; 
+          else 
+            echo "IS_MAVEN=false" >> $GITHUB_ENV; 
+          fi
+          # 检查build.gradle/build.gradle.kts是否存在（Gradle项目）
+          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then 
+            echo "IS_GRADLE=true" >> $GITHUB_ENV; 
+          else 
+            echo "IS_GRADLE=false" >> $GITHUB_ENV; 
+          fi
+        shell: bash  # 强制使用bash执行，跨平台兼容
+
+      # 步骤5：Maven编译（仅当检测到pom.xml时执行）
       - name: Build with Maven (JDK17)
-        if: exists('pom.xml')
-        run: mvn clean package -DskipTests  # 跳过测试加速编译
+        if: env.IS_MAVEN == 'true'
+        run: mvn clean package -DskipTests
         env:
           JAVA_HOME: ${{ steps.setup-java.outputs.path }}
           ARCH: ${{ matrix.arch }}
 
-      # 适配Gradle项目（检测build.gradle/kts）
+      # 步骤6：Gradle编译（仅当检测到Gradle配置文件时执行）
       - name: Build with Gradle (JDK17)
-        if: exists('build.gradle') || exists('build.gradle.kts')
+        if: env.IS_GRADLE == 'true'
         run: |
-          # 区分Windows/Linux/macOS执行命令
+          # 区分系统执行Gradle命令
           if [ "$RUNNER_OS" == "Linux" ] || [ "$RUNNER_OS" == "macOS" ]; then
-            chmod +x ./gradlew
+            chmod +x ./gradlew  # 赋予执行权限
             ./gradlew clean build -x test
           else
             gradlew clean build -x test
@@ -75,19 +95,21 @@ jobs:
           JAVA_HOME: ${{ steps.setup-java.outputs.path }}
           ARCH: ${{ matrix.arch }}
 
-      # 步骤5：上传全平台产物（方便下载）
+      # 步骤7：上传全平台产物（方便下载）
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: JT128-${{ runner.os }}-${{ matrix.arch }}  # 产物命名：项目-系统-架构
           path: |
-            # 核心：根据你的项目实际产物路径调整！
-            target/*.dll   # Windows动态库（Maven输出）
-            target/*.so    # Linux动态库（Maven输出）
-            target/*.dylib # macOS动态库（Maven输出）
-            build/libs/*.dll  # Windows动态库（Gradle输出）
-            build/libs/*.so   # Linux动态库（Gradle输出）
-            build/libs/*.dylib # macOS动态库（Gradle输出）
-            target/*.jar    # 可选：上传jar包
-            build/libs/*.jar # 可选：上传jar包
+            # 请根据你的项目实际产物路径调整！
+            # Maven默认输出路径
+            target/*.dll   # Windows动态库
+            target/*.so    # Linux动态库
+            target/*.dylib # macOS动态库
+            target/*.jar   # JAR包（可选）
+            # Gradle默认输出路径
+            build/libs/*.dll
+            build/libs/*.so
+            build/libs/*.dylib
+            build/libs/*.jar
           if-no-files-found: warn  # 无文件仅警告，不中断流程
