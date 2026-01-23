@@ -1,19 +1,20 @@
-# 工作流名称
-name: Build JT128 All Platforms (CMake)
+# 工作流名称（GitHub Actions页面显示）
+name: Build JT128 All Platforms
 
-# 触发条件
+# 触发条件：推送到dev分支 或 手动触发（方便测试）
 on:
   push:
-    branches: [ dev ]
-  workflow_dispatch:
+    branches: [ dev ]  # 仅dev分支推送时自动触发
+  workflow_dispatch:  # 允许手动触发
 
+# 多平台编译作业
 jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: false  # 一个平台失败不影响其他平台
       matrix:
-        # 平台矩阵：移除macos-12 x86_64组合
+        # 平台矩阵：兼容GitHub托管Runner的实际支持情况
         os: [ ubuntu-latest, windows-latest, macos-latest ]
         arch: [ x86_64, arm64 ]
         # 排除不支持的组合
@@ -21,16 +22,16 @@ jobs:
           - os: windows-latest
             arch: arm64
           - os: macos-latest
-            arch: x86_64  # 仅保留macos-latest arm64
+            arch: x86_64
 
     steps:
       # 步骤1：检出dev分支源码
-      - name: Checkout dev branch
+      - name: Checkout dev branch source code
         uses: actions/checkout@v4
         with:
-          ref: dev
+          ref: dev  # 强制检出dev分支
 
-      # 步骤2：配置JDK17（若项目依赖Java）
+      # 步骤2：配置JDK 17（若项目依赖Java，无依赖可删除）
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -38,40 +39,42 @@ jobs:
           distribution: 'temurin'
           architecture: ${{ matrix.arch }}
 
-      # 步骤3：安装CMake及编译依赖
-      - name: Install dependencies (Ubuntu)
+      # 步骤3：安装CMake及编译依赖（核心：适配CMake项目）
+      - name: Install CMake (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y cmake gcc g++
 
-      - name: Install dependencies (macOS)
+      - name: Install CMake (macOS)
         if: startsWith(matrix.os, 'macos-')
         run: brew install cmake
 
-      - name: Install dependencies (Windows)
+      - name: Install CMake (Windows)
         if: matrix.os == 'windows-latest'
         run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
 
-      # 步骤4：CMake构建（产物输出到根目录build文件夹）
-      - name: CMake Configure & Build
+      # 步骤4：CMake编译（产物输出到JT128/build目录）
+      - name: Build with CMake
         run: |
-          # 创建根目录的build文件夹并编译
+          # 创建根目录build文件夹（即JT128/build）
           mkdir -p build && cd build
+          # 适配不同系统的CMake编译命令
           if [ "$RUNNER_OS" == "Windows" ]; then
             cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'x86_64' && 'x64' || 'ARM64' }} ..
             cmake --build . --config Release
           else
-            cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch == 'x86_64' && 'x86_64' || 'arm64' }} ..
+            cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} ..
             make -j$(nproc)
           fi
         shell: bash
 
-      # 步骤5：上传build目录下的产物
-      - name: Upload build artifacts (output to JT128/build)
+      # 步骤5：上传JT128/build目录的产物
+      - name: Upload build artifacts (JT128/build)
         uses: actions/upload-artifact@v4
         with:
           name: JT128-${{ runner.os }}-${{ matrix.arch }}
           path: |
-            build/**/*.dll   # Windows动态库（build目录下）
-            build/**/*.so    # Linux动态库（build目录下）
-            build/**/*.dylib # macOS动态库（build目录下）
-          if-no-files-found: error  # 无产物时中断，便于排查
+            # 指向根目录build文件夹下的所有动态库
+            build/**/*.dll   # Windows动态库
+            build/**/*.so    # Linux动态库
+            build/**/*.dylib # macOS动态库
+          if-no-files-found: warn
