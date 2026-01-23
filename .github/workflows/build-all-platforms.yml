@@ -72,19 +72,19 @@ jobs:
           echo "OUTPUT_DIR=${OUTPUT_DIR}" >> $GITHUB_ENV
         shell: bash
 
-      # 步骤5：CMake编译（核心步骤，适配跨平台）
+      # 步骤5：CMake编译（核心修复：用GITHUB_WORKSPACE定位源码根目录）
       - name: Build with CMake
         run: |
           # 进入目标输出目录
           cd ${{ env.OUTPUT_DIR }}
-          # 适配不同系统的CMake编译命令
+          # 适配不同系统的CMake编译命令，使用GITHUB_WORKSPACE指向源码根目录
           if [ "$RUNNER_OS" == "Windows" ]; then
-            # Windows使用Visual Studio生成器
-            cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'x86_64' && 'x64' || 'ARM64' }} ../..
+            # Windows使用Visual Studio 2022生成器
+            cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'x86_64' && 'x64' || 'ARM64' }} $GITHUB_WORKSPACE
             cmake --build . --config Release
           else
-            # Linux/macOS使用默认生成器
-            cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} ../..
+            # Linux/macOS使用默认Makefile生成器
+            cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} $GITHUB_WORKSPACE
             make -j$(nproc)
           fi
         shell: bash
