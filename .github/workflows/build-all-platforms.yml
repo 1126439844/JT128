@@ -14,15 +14,15 @@ jobs:
     strategy:
       fail-fast: false  # 一个平台失败不影响其他平台
       matrix:
-        # 平台矩阵：兼容GitHub托管Runner的实际支持情况
+        # 平台矩阵：覆盖目标系统+架构（去掉mac x86）
         os: [ ubuntu-latest, windows-latest, macos-latest ]
         arch: [ x86_64, arm64 ]
         # 排除不支持的组合
         exclude:
-          - os: windows-latest
-            arch: arm64
           - os: macos-latest
-            arch: x86_64
+            arch: x86_64  # macos-latest仅支持arm64
+          - os: windows-latest
+            arch: arm64   # Windows runner暂无arm64环境
 
     steps:
       # 步骤1：检出dev分支源码
@@ -31,7 +31,7 @@ jobs:
         with:
           ref: dev  # 强制检出dev分支
 
-      # 步骤2：配置JDK 17（若项目依赖Java，无依赖可删除）
+      # 步骤2：配置JDK 17
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -39,42 +39,81 @@ jobs:
           distribution: 'temurin'
           architecture: ${{ matrix.arch }}
 
-      # 步骤3：安装CMake及编译依赖（核心：适配CMake项目）
-      - name: Install CMake (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y cmake gcc g++
+      # 步骤3：缓存依赖
+      - name: Cache build dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gradle/caches
+          key: ${{ runner.os }}-${{ matrix.arch }}-java17-${{ hashFiles('**/pom.xml', '**/build.gradle') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-java17-
 
-      - name: Install CMake (macOS)
-        if: startsWith(matrix.os, 'macos-')
-        run: brew install cmake
-
-      - name: Install CMake (Windows)
-        if: matrix.os == 'windows-latest'
-        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
-
-      # 步骤4：CMake编译（产物输出到JT128/build目录）
-      - name: Build with CMake
+      # 步骤4：定义平台+架构输出目录（自动创建）
+      - name: Define platform&arch output directory
+        id: set_output_dir
         run: |
-          # 创建根目录build文件夹（即JT128/build）
-          mkdir -p build && cd build
-          # 适配不同系统的CMake编译命令
+          # 拼接平台+架构目录
           if [ "$RUNNER_OS" == "Windows" ]; then
-            cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'x86_64' && 'x64' || 'ARM64' }} ..
-            cmake --build . --config Release
-          else
-            cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} ..
-            make -j$(nproc)
+            OUTPUT_DIR="build/windows/${{ matrix.arch }}"
+          elif [ "$RUNNER_OS" == "Linux" ]; then
+            OUTPUT_DIR="build/linux/${{ matrix.arch }}"
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            OUTPUT_DIR="build/mac/${{ matrix.arch }}"
+          fi
+          # 递归创建目录（核心：-p参数自动创建所有层级）
+          mkdir -p $OUTPUT_DIR
+          echo "OUTPUT_DIR=${OUTPUT_DIR}" >> $GITHUB_ENV
+        shell: bash
+
+      # 步骤5：检测构建工具
+      - name: Detect build tool (Maven/Gradle)
+        id: detect_build_tool
+        run: |
+          if [ -f "pom.xml" ]; then 
+            echo "IS_MAVEN=true" >> $GITHUB_ENV; 
+          else 
+            echo "IS_MAVEN=false" >> $GITHUB_ENV; 
+          fi
+          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then 
+            echo "IS_GRADLE=true" >> $GITHUB_ENV; 
+          else 
+            echo "IS_GRADLE=false" >> $GITHUB_ENV; 
           fi
         shell: bash
 
-      # 步骤5：上传JT128/build目录的产物
-      - name: Upload build artifacts (JT128/build)
+      # 步骤6：Maven编译（输出到指定目录）
+      - name: Build with Maven (JDK17)
+        if: env.IS_MAVEN == 'true'
+        run: |
+          mvn clean package -DskipTests -Dproject.build.directory=${{ env.OUTPUT_DIR }}
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+          ARCH: ${{ matrix.arch }}
+
+      # 步骤7：Gradle编译（输出到指定目录）
+      - name: Build with Gradle (JDK17)
+        if: env.IS_GRADLE == 'true'
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ] || [ "$RUNNER_OS" == "macOS" ]; then
+            chmod +x ./gradlew
+            ./gradlew clean build -x test -DbuildDir=${{ env.OUTPUT_DIR }}
+          else
+            gradlew clean build -x test -DbuildDir=${{ env.OUTPUT_DIR }}
+          fi
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+          ARCH: ${{ matrix.arch }}
+
+      # 步骤8：上传产物（匹配自动创建的目录）
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: JT128-${{ runner.os }}-${{ matrix.arch }}
           path: |
-            # 指向根目录build文件夹下的所有动态库
-            build/**/*.dll   # Windows动态库
-            build/**/*.so    # Linux动态库
-            build/**/*.dylib # macOS动态库
+            build/windows/x86_64/**/*  # Windows x86_64（自动创建）
+            build/linux/x86_64/**/*    # Linux x86_64（自动创建）
+            build/linux/arm64/**/*     # Linux arm64（自动创建）
+            build/mac/arm64/**/*       # macOS arm64（自动创建，无x86）
           if-no-files-found: warn
