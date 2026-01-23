@@ -1,5 +1,5 @@
 # 工作流名称（GitHub Actions页面显示）
-name: Build JT128 All Platforms
+name: Build JT128 All Platforms (CMake)
 
 # 触发条件：推送到dev分支 或 手动触发（方便测试）
 on:
@@ -31,7 +31,7 @@ jobs:
         with:
           ref: dev  # 强制检出dev分支
 
-      # 步骤2：配置JDK 17
+      # 步骤2：配置JDK 17（若项目依赖Java，无依赖可删除）
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -39,16 +39,21 @@ jobs:
           distribution: 'temurin'
           architecture: ${{ matrix.arch }}
 
-      # 步骤3：缓存依赖
-      - name: Cache build dependencies
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.m2/repository
-            ~/.gradle/caches
-          key: ${{ runner.os }}-${{ matrix.arch }}-java17-${{ hashFiles('**/pom.xml', '**/build.gradle') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-java17-
+      # 步骤3：安装CMake及编译依赖（分平台）
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y cmake gcc g++
+        shell: bash
+
+      - name: Install dependencies (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: brew install cmake
+        shell: bash
+
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+        shell: cmd
 
       # 步骤4：定义平台+架构输出目录（自动创建）
       - name: Define platform&arch output directory
@@ -67,53 +72,31 @@ jobs:
           echo "OUTPUT_DIR=${OUTPUT_DIR}" >> $GITHUB_ENV
         shell: bash
 
-      # 步骤5：检测构建工具
-      - name: Detect build tool (Maven/Gradle)
-        id: detect_build_tool
+      # 步骤5：CMake编译（核心步骤，适配跨平台）
+      - name: Build with CMake
         run: |
-          if [ -f "pom.xml" ]; then 
-            echo "IS_MAVEN=true" >> $GITHUB_ENV; 
-          else 
-            echo "IS_MAVEN=false" >> $GITHUB_ENV; 
-          fi
-          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then 
-            echo "IS_GRADLE=true" >> $GITHUB_ENV; 
-          else 
-            echo "IS_GRADLE=false" >> $GITHUB_ENV; 
+          # 进入目标输出目录
+          cd ${{ env.OUTPUT_DIR }}
+          # 适配不同系统的CMake编译命令
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            # Windows使用Visual Studio生成器
+            cmake -G "Visual Studio 17 2022" -A ${{ matrix.arch == 'x86_64' && 'x64' || 'ARM64' }} ../..
+            cmake --build . --config Release
+          else
+            # Linux/macOS使用默认生成器
+            cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} ../..
+            make -j$(nproc)
           fi
         shell: bash
 
-      # 步骤6：Maven编译（输出到指定目录）
-      - name: Build with Maven (JDK17)
-        if: env.IS_MAVEN == 'true'
-        run: |
-          mvn clean package -DskipTests -Dproject.build.directory=${{ env.OUTPUT_DIR }}
-        env:
-          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
-          ARCH: ${{ matrix.arch }}
-
-      # 步骤7：Gradle编译（输出到指定目录）
-      - name: Build with Gradle (JDK17)
-        if: env.IS_GRADLE == 'true'
-        run: |
-          if [ "$RUNNER_OS" == "Linux" ] || [ "$RUNNER_OS" == "macOS" ]; then
-            chmod +x ./gradlew
-            ./gradlew clean build -x test -DbuildDir=${{ env.OUTPUT_DIR }}
-          else
-            gradlew clean build -x test -DbuildDir=${{ env.OUTPUT_DIR }}
-          fi
-        env:
-          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
-          ARCH: ${{ matrix.arch }}
-
-      # 步骤8：上传产物（匹配自动创建的目录）
+      # 步骤6：上传全平台产物（匹配自动创建的目录）
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: JT128-${{ runner.os }}-${{ matrix.arch }}
           path: |
-            build/windows/x86_64/**/*  # Windows x86_64（自动创建）
-            build/linux/x86_64/**/*    # Linux x86_64（自动创建）
-            build/linux/arm64/**/*     # Linux arm64（自动创建）
-            build/mac/arm64/**/*       # macOS arm64（自动创建，无x86）
-          if-no-files-found: warn
+            build/windows/x86_64/**/*  # Windows x86_64产物（.dll等）
+            build/linux/x86_64/**/*    # Linux x86_64产物（.so等）
+            build/linux/arm64/**/*     # Linux arm64产物（.so等）
+            build/mac/arm64/**/*       # macOS arm64产物（.dylib等）
+          if-no-files-found: warn  # 无文件仅警告，便于排查
